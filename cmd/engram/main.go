@@ -3,6 +3,7 @@
 // Usage:
 //
 //	engram serve          Start HTTP + MCP server
+//	engram serve stop     Stop the running `engram serve` process
 //	engram mcp            Start MCP server only (stdio transport)
 //	engram search <query> Search memories from CLI
 //	engram save           Save a memory from CLI
@@ -707,6 +708,25 @@ func cloudSyncFailureMessage(project string, syncErr error) string {
 	return syncguidance.AppendGuidance(syncErr.Error(), project, syncErr)
 }
 
+// resolveServeConfig resolves the store config used by CLI commands, applying
+// the same logic as the main dispatch: the default data directory, a home
+// fallback when os.UserHomeDir() fails, and the ENGRAM_DATA_DIR override.
+func resolveServeConfig() (store.Config, error) {
+	cfg, cfgErr := storeDefaultConfig()
+	if cfgErr != nil {
+		if home := resolveHomeFallback(); home != "" {
+			log.Printf("[engram] UserHomeDir failed, using fallback: %s", home)
+			cfg = store.FallbackConfig(filepath.Join(home, ".engram"))
+		} else {
+			return store.Config{}, cfgErr
+		}
+	}
+	if dir := os.Getenv("ENGRAM_DATA_DIR"); strings.TrimSpace(dir) != "" {
+		cfg.DataDir = dir
+	}
+	return cfg, nil
+}
+
 func main() {
 	if len(os.Args) > 1 && os.Args[1] == "migrate-copy" {
 		if code := runMigrateCopy(os.Args[2:], os.Stdout, os.Stderr); code != 0 {
@@ -780,6 +800,21 @@ func main() {
 	}
 
 	if os.Args[1] == "serve" {
+		if len(os.Args) > 2 && os.Args[2] == "stop" {
+			// Resolve the same config the running serve process used, including
+			// the ENGRAM_DATA_DIR override, so the stop command reads the PID file
+			// from the same data directory.
+			cfg, err := resolveServeConfig()
+			if err != nil {
+				fatal(err)
+				return
+			}
+			if err := cmdServeStop(cfg); err != nil {
+				fatal(err)
+				return
+			}
+			return
+		}
 		if _, err := validateSessionOwned(os.Args[2:]); err != nil {
 			fatal(err)
 			return
@@ -960,6 +995,17 @@ func cmdServe(cfg store.Config) error {
 	defer s.Close()
 	if options.sessionOwned && ctx.Err() != nil {
 		return nil
+	}
+
+	// Non-session-owned servers publish a PID file so `engram serve stop`
+	// can find and signal this process. Session-owned servers are owned by
+	// their parent process and must not be stopped by the CLI.
+	if !options.sessionOwned {
+		pidPath := filepath.Join(cfg.DataDir, "serve.pid")
+		defer os.Remove(pidPath)
+		if err := os.WriteFile(pidPath, []byte(strconv.Itoa(os.Getpid())), 0600); err != nil {
+			log.Printf("[engram] could not write serve PID file %s: %v", pidPath, err)
+		}
 	}
 
 	srv := newHTTPServer(s, options.port)
@@ -3919,6 +3965,7 @@ Usage:
 
 Commands:
   serve [port]       Start HTTP API server (default: 7437)
+  serve stop         Stop the running engram serve process (SIGTERM, SIGKILL fallback)
   serve --session-owned  Private ephemeral HTTP server; requires ENGRAM_TOKEN, stops on stdin EOF
   mcp [--tools=PROFILE] [--project NAME]
                      Start MCP server (stdio transport, for any AI agent)

@@ -18,6 +18,7 @@ import (
 	"github.com/Gentleman-Programming/engram/v3/internal/version"
 
 	"github.com/charmbracelet/bubbles/spinner"
+	"github.com/charmbracelet/bubbles/textarea"
 	tea "github.com/charmbracelet/bubbletea"
 	"github.com/charmbracelet/lipgloss"
 )
@@ -32,6 +33,7 @@ const (
 	ScreenSearchResults
 	ScreenRecent
 	ScreenObservationDetail
+	ScreenObservationEdit
 	ScreenTimeline
 	ScreenSessions
 	ScreenSessionDetail
@@ -80,6 +82,11 @@ type recentObservationsMsg struct {
 }
 
 type observationDetailMsg struct {
+	observation *store.Observation
+	err         error
+}
+
+type observationUpdatedMsg struct {
 	observation *store.Observation
 	err         error
 }
@@ -180,6 +187,12 @@ type Model struct {
 	// Observation detail
 	SelectedObservation *store.Observation
 	DetailScroll        int
+
+	// Observation edit
+	EditTitle    textInput
+	EditContent  textarea.Model
+	EditError    string
+	EditFeedback string
 
 	// Timeline
 	Timeline *store.TimelineResult
@@ -300,6 +313,20 @@ func loadObservationDetail(s *store.Store, id int64) tea.Cmd {
 	return func() tea.Msg {
 		obs, err := s.GetObservation(id)
 		return observationDetailMsg{observation: obs, err: err}
+	}
+}
+
+// saveObservationEdit returns a Cmd that persists the edit buffers for an
+// observation and emits observationUpdatedMsg with the result.
+func saveObservationEdit(s *store.Store, id int64, title, content string) tea.Cmd {
+	if s == nil {
+		return func() tea.Msg {
+			return observationUpdatedMsg{err: errors.New("store is unavailable")}
+		}
+	}
+	return func() tea.Msg {
+		obs, err := s.UpdateObservation(id, store.UpdateObservationParams{Title: &title, Content: &content})
+		return observationUpdatedMsg{observation: obs, err: err}
 	}
 }
 

@@ -117,6 +117,347 @@ func TestUpdateObservationDetailEscRefreshesPrevScreen(t *testing.T) {
 	}
 }
 
+// observationEditModel builds a model on the observation detail screen with a
+// selected observation, ready for edit-screen tests.
+func observationEditModel(t *testing.T, fx testFixture) (Model, *store.Observation) {
+	obs := loadFixtureObservation(t, fx, fx.obsID)
+	m := New(fx.store, "")
+	m.Screen = ScreenObservationDetail
+	m.PrevScreen = ScreenRecent
+	m.SelectedObservation = obs
+	m.Width = 80
+	m.Height = 24
+	updatedModel, _ := m.Update(keyMsg('e'))
+	return updatedModel.(Model), obs
+}
+
+// keyMsg builds a tea.KeyMsg for a single character key; bubbletea only
+// defines named constants for a fixed set of keys, so plain characters use
+// KeyRunes with the rune in Runes.
+func keyMsg(r rune) tea.Msg {
+	return tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{r}}
+}
+
+func TestUpdateObservationEditOpensFromDetail(t *testing.T) {
+	fx := newTestFixture(t)
+	m, obs := observationEditModel(t, fx)
+
+	if m.Screen != ScreenObservationEdit {
+		t.Fatalf("screen = %v, want %v", m.Screen, ScreenObservationEdit)
+	}
+	if m.PrevScreen != ScreenRecent {
+		// Opening the edit screen must not clobber PrevScreen: it holds the
+		// screen that opened the observation detail (ScreenRecent here), and
+		// esc/save from the edit screen must return through the detail back to
+		// it.
+		t.Fatalf("prev screen after opening edit = %v, want ScreenRecent", m.PrevScreen)
+	}
+	if m.EditTitle.Value() != obs.Title {
+		t.Fatalf("edit title = %q, want %q", m.EditTitle.Value(), obs.Title)
+	}
+	if m.EditContent.Value() != obs.Content {
+		t.Fatalf("edit content = %q, want %q", m.EditContent.Value(), obs.Content)
+	}
+	if !m.EditContent.Focused() || m.EditTitle.Focused() {
+		t.Fatalf("content focus = %v, title focus = %v; want content focused", m.EditContent.Focused(), m.EditTitle.Focused())
+	}
+	if m.EditError != "" || m.EditFeedback != "" {
+		t.Fatalf("edit error = %q, edit feedback = %q; want empty", m.EditError, m.EditFeedback)
+	}
+	// SetWidth reserves the default prompt width (2) and line numbers (4),
+	// so the internal width is 80 - 4 - 6 = 70.
+	if m.EditContent.Width() != 70 {
+		t.Fatalf("edit content width = %d, want 70", m.EditContent.Width())
+	}
+	if m.EditContent.Height() != 18 {
+		t.Fatalf("edit content height = %d, want 18", m.EditContent.Height())
+	}
+	if m.EditContent.CharLimit != fx.store.MaxObservationLength() {
+		t.Fatalf("edit content char limit = %d, want %d", m.EditContent.CharLimit, fx.store.MaxObservationLength())
+	}
+}
+
+func TestUpdateObservationEditEscCancelsWithoutStoreWrite(t *testing.T) {
+	fx := newTestFixture(t)
+	m, _ := observationEditModel(t, fx)
+	m.EditTitle.SetValue("Canceled title")
+
+	updatedModel, cmd := m.Update(tea.KeyMsg{Type: tea.KeyEsc})
+	updated := updatedModel.(Model)
+	if updated.Screen != ScreenObservationDetail {
+		t.Fatalf("screen after esc = %v, want %v", updated.Screen, ScreenObservationDetail)
+	}
+	if updated.DetailScroll != 0 {
+		t.Fatalf("detail scroll after esc = %d, want 0", updated.DetailScroll)
+	}
+	if cmd == nil {
+		t.Fatal("expected detail reload command when canceling edit")
+	}
+	got, err := fx.store.GetObservation(fx.obsID)
+	if err != nil {
+		t.Fatalf("get observation after cancel: %v", err)
+	}
+	if got.Title != "Needle observation" {
+		t.Fatalf("title after cancel = %q, want unchanged", got.Title)
+	}
+}
+
+func TestUpdateObservationEditCtrlSStoresCurrentBufferValues(t *testing.T) {
+	fx := newTestFixture(t)
+	m, _ := observationEditModel(t, fx)
+	m.EditTitle.SetValue("Updated title from edit")
+	m.EditContent.SetValue("Updated content from edit")
+
+	updatedModel, cmd := m.Update(tea.KeyMsg{Type: tea.KeyCtrlS})
+	updated := updatedModel.(Model)
+	if updated.Screen != ScreenObservationEdit {
+		t.Fatalf("screen after save request = %v, want %v", updated.Screen, ScreenObservationEdit)
+	}
+	if cmd == nil {
+		t.Fatal("expected saveObservationEdit command for ctrl+s")
+	}
+
+	msg := cmd()
+	updatedMsg, ok := msg.(observationUpdatedMsg)
+	if !ok || updatedMsg.err != nil {
+		t.Fatalf("save command did not emit a successful observationUpdatedMsg: %v", msg)
+	}
+
+	got, err := fx.store.GetObservation(fx.obsID)
+	if err != nil {
+		t.Fatalf("get observation: %v", err)
+	}
+	if got.Title != "Updated title from edit" || got.Content != "Updated content from edit" {
+		t.Fatalf("observation not updated with buffer values: %+v", got)
+	}
+}
+
+func TestObservationEditFocusTransitions(t *testing.T) {
+	fx := newTestFixture(t)
+	m, _ := observationEditModel(t, fx) // content focused by default
+
+	// Content focused: only shift+tab moves focus to the title. j and k are
+	// plain characters and must not move focus.
+	next, _ := m.Update(keyMsg('j'))
+	if !next.(Model).EditContent.Focused() {
+		t.Fatal("j from content should keep content focused")
+	}
+	next, _ = next.(Model).Update(keyMsg('k'))
+	if !next.(Model).EditContent.Focused() {
+		t.Fatal("k from content should keep content focused")
+	}
+	next, _ = m.Update(tea.KeyMsg{Type: tea.KeyShiftTab})
+	if !next.(Model).EditTitle.Focused() || next.(Model).EditContent.Focused() {
+		t.Fatalf("shift+tab from content should focus title only")
+	}
+
+	// Title focused: only tab and enter move focus to content. j and k must
+	// not move focus.
+	titleFocused, _ := m.Update(tea.KeyMsg{Type: tea.KeyShiftTab})
+	titleFocused = titleFocused.(Model)
+
+	next, _ = titleFocused.Update(keyMsg('j'))
+	if !next.(Model).EditTitle.Focused() {
+		t.Fatal("j from title should keep title focused")
+	}
+	next, _ = titleFocused.Update(keyMsg('k'))
+	if !next.(Model).EditTitle.Focused() {
+		t.Fatal("k from title should keep title focused")
+	}
+
+	next, _ = titleFocused.Update(tea.KeyMsg{Type: tea.KeyTab})
+	if !next.(Model).EditContent.Focused() || next.(Model).EditTitle.Focused() {
+		t.Fatalf("tab from title should focus content only")
+	}
+
+	next, _ = titleFocused.Update(tea.KeyMsg{Type: tea.KeyEnter})
+	if !next.(Model).EditContent.Focused() || next.(Model).EditTitle.Focused() {
+		t.Fatalf("enter from title should focus content only")
+	}
+}
+
+// TestObservationEditInsertsJKInContent verifies that j and k are inserted
+// as plain characters into the content textarea (not bound for focus movement
+// or scrolling) while content stays focused.
+func TestObservationEditInsertsJKInContent(t *testing.T) {
+	fx := newTestFixture(t)
+	m, _ := observationEditModel(t, fx) // content focused by default
+	base := m.EditContent.Value()
+
+	out, _ := m.Update(keyMsg('j'))
+	m = out.(Model)
+	if !m.EditContent.Focused() || m.EditTitle.Focused() {
+		t.Fatal("j from content should keep content focused")
+	}
+	if m.EditContent.Value() != base+"j" {
+		t.Fatalf("content after j = %q, want %q", m.EditContent.Value(), base+"j")
+	}
+
+	out, _ = m.Update(keyMsg('k'))
+	m = out.(Model)
+	if m.EditContent.Value() != base+"jk" {
+		t.Fatalf("content after k = %q, want %q", m.EditContent.Value(), base+"jk")
+	}
+}
+
+// TestObservationEditInsertsJKInTitle verifies that j and k are inserted as
+// plain characters into the single-line title input while title stays focused.
+func TestObservationEditInsertsJKInTitle(t *testing.T) {
+	fx := newTestFixture(t)
+	m, _ := observationEditModel(t, fx)
+	out, _ := m.Update(tea.KeyMsg{Type: tea.KeyShiftTab})
+	m = out.(Model)
+	base := m.EditTitle.Value()
+
+	out, _ = m.Update(keyMsg('j'))
+	m = out.(Model)
+	if !m.EditTitle.Focused() || m.EditContent.Focused() {
+		t.Fatal("j from title should keep title focused")
+	}
+	if m.EditTitle.Value() != base+"j" {
+		t.Fatalf("title after j = %q, want %q", m.EditTitle.Value(), base+"j")
+	}
+
+	out, _ = m.Update(keyMsg('k'))
+	m = out.(Model)
+	if m.EditTitle.Value() != base+"jk" {
+		t.Fatalf("title after k = %q, want %q", m.EditTitle.Value(), base+"jk")
+	}
+}
+
+// TestObservationEditEscAndSaveReturnToPrevScreen verifies that esc or save
+// from the edit screen returns through the observation detail back to the
+// screen that opened the detail (PrevScreen is preserved, not clobbered by
+// the edit screen).
+func TestObservationEditEscAndSaveReturnToPrevScreen(t *testing.T) {
+	fx := newTestFixture(t)
+	obs := loadFixtureObservation(t, fx, fx.obsID)
+
+	// Cancel path: detail -> edit -> esc -> detail (PrevScreen preserved) ->
+	// esc -> the screen that opened the detail.
+	m := New(fx.store, "")
+	m.Screen = ScreenObservationDetail
+	m.PrevScreen = ScreenRecent
+	m.SelectedObservation = obs
+	m.Width = 80
+	m.Height = 24
+
+	out, _ := m.Update(keyMsg('e'))
+	m = out.(Model)
+	if m.PrevScreen != ScreenRecent {
+		t.Fatalf("prev screen after opening edit = %v, want ScreenRecent (not clobbered)", m.PrevScreen)
+	}
+
+	out, _ = m.Update(tea.KeyMsg{Type: tea.KeyEsc})
+	m = out.(Model)
+	if m.Screen != ScreenObservationDetail {
+		t.Fatalf("screen after esc from edit = %v, want %v", m.Screen, ScreenObservationDetail)
+	}
+	if m.PrevScreen != ScreenRecent {
+		t.Fatalf("prev screen after esc from edit = %v, want ScreenRecent", m.PrevScreen)
+	}
+	out, _ = m.Update(tea.KeyMsg{Type: tea.KeyEsc})
+	m = out.(Model)
+	if m.Screen != ScreenRecent {
+		t.Fatalf("screen after second esc = %v, want ScreenRecent", m.Screen)
+	}
+
+	// Save path: detail -> edit -> save -> detail -> esc -> the screen that
+	// opened the detail.
+	m = New(fx.store, "")
+	m.Screen = ScreenObservationDetail
+	m.PrevScreen = ScreenRecent
+	m.SelectedObservation = obs
+	m.Width = 80
+	m.Height = 24
+
+	out, _ = m.Update(keyMsg('e'))
+	m = out.(Model)
+	out, cmd := m.Update(tea.KeyMsg{Type: tea.KeyCtrlS})
+	if cmd == nil {
+		t.Fatal("expected saveObservationEdit command for ctrl+s")
+	}
+	msg := cmd()
+	updatedMsg, ok := msg.(observationUpdatedMsg)
+	if !ok || updatedMsg.err != nil {
+		t.Fatalf("save command did not emit a successful observationUpdatedMsg: %v", msg)
+	}
+	out, _ = m.Update(observationUpdatedMsg{observation: updatedMsg.observation, err: nil})
+	m = out.(Model)
+	if m.Screen != ScreenObservationDetail {
+		t.Fatalf("screen after save = %v, want %v", m.Screen, ScreenObservationDetail)
+	}
+	if m.PrevScreen != ScreenRecent {
+		t.Fatalf("prev screen after save = %v, want ScreenRecent", m.PrevScreen)
+	}
+	out, _ = m.Update(tea.KeyMsg{Type: tea.KeyEsc})
+	m = out.(Model)
+	if m.Screen != ScreenRecent {
+		t.Fatalf("screen after esc from detail (post-save) = %v, want ScreenRecent", m.Screen)
+	}
+}
+
+// TestObservationEditArrowsScrollContent verifies that up/down/pageup/pagedown
+// while the content textarea is focused scroll the text (move the cursor line)
+// without moving focus away from the content buffer.
+func TestObservationEditArrowsScrollContent(t *testing.T) {
+	fx := newTestFixture(t)
+	m, _ := observationEditModel(t, fx)
+
+	// Multi-line content so vertical scrolling is observable.
+	m.EditContent.SetValue("line one\nline two\nline three\nline four\nline five")
+
+	// SetValue places the cursor at the end of the value (line 4). Reset it to
+	// line 0 so the vertical-scroll assertions start from a known position.
+	for i := 0; i < 10; i++ {
+		next, _ := m.Update(tea.KeyMsg{Type: tea.KeyUp})
+		m = next.(Model)
+	}
+	if line := m.EditContent.Line(); line != 0 {
+		t.Fatalf("cursor not reset to top: Line() = %d, want 0", line)
+	}
+
+	// down scrolls from line 0 to line 1; focus stays on content.
+	updatedModel, _ := m.Update(tea.KeyMsg{Type: tea.KeyDown})
+	updated := updatedModel.(Model)
+	if !updated.EditContent.Focused() {
+		t.Fatal("down from content should keep content focused")
+	}
+	if updated.EditContent.Line() != 1 {
+		t.Fatalf("down from content Line() = %d, want 1", updated.EditContent.Line())
+	}
+
+	// page up scrolls from line 1 to line 0; focus stays on content.
+	updatedModel, _ = updated.Update(tea.KeyMsg{Type: tea.KeyPgUp})
+	updated = updatedModel.(Model)
+	if !updated.EditContent.Focused() {
+		t.Fatal("page up from content should keep content focused")
+	}
+	if updated.EditContent.Line() != 0 {
+		t.Fatalf("page up from content Line() = %d, want 0", updated.EditContent.Line())
+	}
+
+	// page down scrolls from line 0 to line 1; focus stays on content.
+	updatedModel, _ = m.Update(tea.KeyMsg{Type: tea.KeyPgDown})
+	updated = updatedModel.(Model)
+	if !updated.EditContent.Focused() {
+		t.Fatal("page down from content should keep content focused")
+	}
+	if updated.EditContent.Line() != 1 {
+		t.Fatalf("page down from content Line() = %d, want 1", updated.EditContent.Line())
+	}
+
+	// up scrolls from line 1 to line 0; focus stays on content.
+	updatedModel, _ = updated.Update(tea.KeyMsg{Type: tea.KeyUp})
+	updated = updatedModel.(Model)
+	if !updated.EditContent.Focused() {
+		t.Fatal("up from content should keep content focused")
+	}
+	if updated.EditContent.Line() != 0 {
+		t.Fatalf("up from content Line() = %d, want 0", updated.EditContent.Line())
+	}
+}
+
 func TestUpdateSetupFlowAndSpinnerTick(t *testing.T) {
 	fx := newTestFixture(t)
 	m := New(fx.store, "")

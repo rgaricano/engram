@@ -7,6 +7,8 @@ import (
 	"github.com/Gentleman-Programming/engram/v3/internal/setup"
 	"github.com/Gentleman-Programming/engram/v3/internal/store"
 	"github.com/Gentleman-Programming/engram/v3/internal/version"
+
+	"github.com/charmbracelet/bubbles/textarea"
 )
 
 type testFixture struct {
@@ -64,6 +66,15 @@ func newTestFixture(t *testing.T) testFixture {
 	}
 
 	return testFixture{store: s, sessionID: "session-1", obsID: obsID, secondObs: secondObs, otherSession: "session-2"}
+}
+
+// loadFixtureObservation returns a stored observation by ID for tests.
+func loadFixtureObservation(t *testing.T, fx testFixture, id int64) *store.Observation {
+	obs, err := fx.store.GetObservation(id)
+	if err != nil {
+		t.Fatalf("get observation %d: %v", id, err)
+	}
+	return obs
 }
 
 func TestNewInitializesModelDefaults(t *testing.T) {
@@ -287,3 +298,55 @@ func TestInstallAgentCommand(t *testing.T) {
 		}
 	})
 }
+
+func TestUpdateObservationUpdatedMsgHandler(t *testing.T) {
+	fx := newTestFixture(t)
+	obs := loadFixtureObservation(t, fx, fx.obsID)
+	m := New(fx.store, "")
+	m.Screen = ScreenObservationEdit
+	m.PrevScreen = ScreenObservationDetail
+	m.EditTitle = newTextInput()
+	m.EditTitle.SetValue("Old title")
+	m.EditContent = textarea.New()
+	m.EditContent.SetValue("Old content")
+	m.EditContent.Focus()
+
+	// Success: detail screen restored, feedback shown, selected observation replaced.
+	updated, cmd := m.Update(observationUpdatedMsg{observation: obs, err: nil})
+	model := updated.(Model)
+	if model.Screen != ScreenObservationDetail {
+		t.Fatalf("screen after successful edit = %v, want %v", model.Screen, ScreenObservationDetail)
+	}
+	if model.EditFeedback != "✓ Saved!" {
+		t.Fatalf("edit feedback = %q, want %q", model.EditFeedback, "✓ Saved!")
+	}
+	if model.ErrorMsg != "" {
+		t.Fatalf("error msg after success = %q, want empty", model.ErrorMsg)
+	}
+	if model.SelectedObservation == nil || model.SelectedObservation.ID != fx.obsID {
+		t.Fatal("selected observation was not updated")
+	}
+	if cmd == nil {
+		t.Fatal("expected edit feedback clear command after success")
+	}
+
+	// The clear cmd resets feedback.
+	msg := cmd()
+	updated, _ = m.Update(msg)
+	model = updated.(Model)
+	if model.EditFeedback != "" {
+		t.Fatalf("edit feedback after clear = %q, want empty", model.EditFeedback)
+	}
+
+	// Error: stays on the edit screen with ErrorMsg set.
+	model.Screen = ScreenObservationEdit
+	updated, _ = model.Update(observationUpdatedMsg{observation: nil, err: errors.New("update failed")})
+	model = updated.(Model)
+	if model.Screen != ScreenObservationEdit {
+		t.Fatalf("screen after edit error = %v, want %v", model.Screen, ScreenObservationEdit)
+	}
+	if model.ErrorMsg != "update failed" {
+		t.Fatalf("error msg after edit error = %q, want %q", model.ErrorMsg, "update failed")
+	}
+}
+

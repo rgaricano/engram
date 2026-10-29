@@ -74,6 +74,8 @@ func (m Model) View() string {
 		content = m.viewRecent()
 	case ScreenObservationDetail:
 		content = m.viewObservationDetail()
+	case ScreenObservationEdit:
+		content = m.viewObservationEdit()
 	case ScreenTimeline:
 		content = m.viewTimeline()
 	case ScreenSessions:
@@ -102,6 +104,10 @@ func (m Model) View() string {
 	// Show clipboard copy feedback if present
 	if m.CopyFeedback != "" {
 		content += "\n" + copyFeedbackStyle.Render(m.CopyFeedback)
+	}
+	// Show observation edit feedback if present
+	if m.EditFeedback != "" {
+		content += "\n" + copyFeedbackStyle.Render(m.EditFeedback)
 	}
 
 	return appStyle.Render(content)
@@ -881,7 +887,32 @@ func renderObservationDetailChrome(obs *store.Observation, metadata []string) st
 }
 
 func observationDetailHelp() string {
-	return helpStyle.Render("\n  j/k scroll • c copy • t timeline • esc back")
+	return helpStyle.Render("\n  j/k scroll • c copy • t timeline • e edit • esc back")
+}
+
+// viewObservationEdit renders the observation edit screen with title and
+// content buffers.
+func (m Model) viewObservationEdit() string {
+	var b strings.Builder
+
+	if m.SelectedObservation == nil {
+		b.WriteString(headerStyle.Render("  Observation Edit"))
+		b.WriteString("\n")
+		b.WriteString(noResultsStyle.Render("No observation selected."))
+		return b.String()
+	}
+
+	b.WriteString(headerStyle.Render(fmt.Sprintf("  Observation #%d — Edit", m.SelectedObservation.ID)))
+	b.WriteString("\n")
+
+	b.WriteString(detailLabelStyle.Render("Title:") + m.EditTitle.View())
+	b.WriteString("\n")
+	b.WriteString(strings.Repeat("─", max(0, m.Width-4)))
+	b.WriteString("\n")
+	b.WriteString(m.EditContent.View())
+	b.WriteString(helpStyle.Render("\n  tab/shift+tab focus • arrows scroll • ctrl+s save • esc cancel"))
+
+	return b.String()
 }
 
 func (m Model) observationDetailContentLines() []string {
