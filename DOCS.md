@@ -17,7 +17,7 @@ This is the complete technical reference for Engram. For getting started, see th
 | [Documentation surface catalog](#documentation-surface-catalog) | Audience, authority, status, and review routing for tracked Markdown |
 | [CLI Reference](#cli-reference)                           | General command inventory and detailed CLI links             |
 | [HTTP API](#http-api-endpoints)                           | All REST endpoints with request/response details             |
-| [MCP Tools](#mcp-tools-26-tools)                          | Detailed reference for all 26 memory tools                   |
+| [MCP Tools](#mcp-tools-27-tools)                          | Detailed reference for all 27 memory tools                   |
 | [MCP Project Resolution](#mcp-project-resolution)         | Auto-detection algorithm, response envelope, tool categories |
 | [Memory Protocol](#memory-protocol)                       | When/how agents should use the tools                         |
 | [Project Name Normalization](#project-name-normalization) | Auto-detection, normalization, similar-project warnings      |
@@ -232,6 +232,37 @@ Cloud commands include `cloud status`, `cloud config --server <url>`, `cloud enr
 
 ## HTTP API Endpoints
 
+### Local caller trust and ownership policy
+
+The local store supports one user with trusted local clients and processes. It does not promise isolation between mutually untrusted clients or projects. Loopback TCP alone does not authenticate callers; the optional Unix socket is a transport choice, not a project permission model.
+
+Keep these boundaries separate:
+
+| Boundary | Supported authority |
+| --- | --- |
+| Standalone local HTTP | `ENGRAM_HTTP_TOKEN` provides selective instance-level authentication on wrapped routes, not project authorization. In particular, observation DELETE requires a matching Bearer credential when configured; observation PATCH is not gated by that selective wrapper, even when the token is configured. Other handler validation still applies. |
+| Session-owned local HTTP | The private child-lifetime token configured by `SetSessionOwnedToken` authenticates the entire handler, including PATCH and health. This is separate from standalone selective-token protection. |
+| Native MCP | Tool profiles select registered capabilities: `mem_update` is in `agent`, `mem_delete` is in `admin`, and legacy `all` retains both. Profiles are not per-project grants, and hiding tools is not a security boundary. |
+| Cloud | Authenticated principals and server-enforced project grants or legacy allowlists belong to the separate cloud server boundary. They do not establish local tenant isolation. |
+
+For HTTP observation PATCH/DELETE and native MCP `mem_update`/`mem_delete`, caller-supplied `expected_project` is an ownership-consistency assertion, not authentication or a permission grant. It is normalized and checked atomically against the stored owner. Do not manufacture a missing assertion by reading the target record. Neither cwd, the MCP process project, nor a model-authored owner assertion establishes an authenticated project identity.
+
+Deliberate cross-project maintenance by observation ID remains supported with a matching normalized owner, including administrative MCP deletion. Changing cwd must not silently redefine ownership or introduce a new permission rule. Personal/global scope does not bypass owner checks.
+
+Representative observation-mutation outcomes:
+
+- Missing, blank, or invalid owner assertions are rejected (HTTP `400`).
+- A normalized owner mismatch is rejected (HTTP `409` or MCP tool error) without an owner-mismatched mutation.
+- A matching owner can permit MCP update/delete even with an unrelated or ambiguous process project; it does not bypass other operation validation.
+- Standalone DELETE with a configured token rejects missing/wrong credentials with `401` before mutation; correct credentials still require the owner assertion.
+- Session-owned HTTP rejects missing/wrong private credentials at the outer boundary, including for PATCH and health.
+
+These examples do not imply identical HTTP/MCP responses or universal rollback after every possible failure. Each operation retains its existing validation, lookup, ownership, and post-mutation failure precedence.
+
+Broader standalone HTTP authentication requires a separately scoped hardening change with an affected-route/client inventory, compatibility and migration plan, and explicit error-precedence rules. Regression coverage must preserve owner-rejection side effects, deliberate cross-project maintenance, standalone versus session-owned authentication boundaries, and profile compatibility unless a change is explicitly approved. This policy does not introduce RBAC or project identities.
+
+Policy decision: [#1580](https://github.com/Gentleman-Programming/engram/issues/1580#issuecomment-6325244866).
+
 ### Explicit project selection inside HOME repositories
 
 When HOME itself is a Git repository, capture from an untracked descendant requires an explicit project designation. This includes new dotfiles folders: folder names alone are not project intent. HOME itself, subfolders containing Git-index-tracked files, nested independent repositories, and ordinary non-HOME monorepos retain normal detection.
@@ -434,6 +465,8 @@ For an accepted `POST /sync/mutations/push`, each future materialized cloud chun
 - `POST /prompts/capture-decision` — Read-only Claude capture decision. Body: `{source:"claude-code", cwd:<nonblank string>, content:<string>}`. Returns `200 {decision:"skip"}` for trimmed blank content or content starting with `<task-notification>` or `<agent-message`; otherwise returns `200 {decision:"capture", ...}` with the current-project metadata schema, resolved by inspection only (unlike `GET /project/current`, this route never establishes Git bindings). An unbound Git repository returns `project_source:"unbound_git"`, which capture adapters MUST NOT treat as established canonical identity; normal SessionStart/project resolution may first need to establish that binding. Conflicting or ambiguous history fails closed through existing project error responses. Do not add a second, writing project GET to the capture decision path. Malformed, missing, wrong-type, unsupported-source, unknown-field, or trailing JSON requests return `400`; project resolution errors use existing project error responses. No prompts, counters, or database state are changed. Claude capture-enabled hooks use this instead of their capture project GET, then persist original human content once through `POST /prompts`. Updating the server is required for automatic Claude capture: unsupported endpoints or invalid/error responses skip persistence without a local prefix fallback. Reminder reads and other hooks are unchanged; the builtin-only Windows Git Bash path makes no API calls.
 - `GET /prompts/recent` — Recent prompts. Query: `?project=X&all_projects=true&limit=N`
 - `GET /prompts/search` — Search prompts. Query: `?q=QUERY&project=X&all_projects=true&limit=N`
+  - `q` is required for search. Omitted project scope uses the current project; an explicit known project and `all_projects=true` are mutually exclusive. Default search limit is 10; nonpositive limits use 10.
+  - Search returns full stored prompt content with identifying context. Normal terms use FTS rank; short terms use LIKE newest-first ordering. This is also the Pi transport for `mem_search_prompts`.
   - No-result responses from both prompt collection endpoints return `200` with `[]` (never `null`)
 - `DELETE /prompts/{id}` — Delete prompt
   - `200` when deleted
@@ -756,6 +789,14 @@ Response:
 ### Environment Variables
 
 Release update checks are skipped for `version`, `--version`, `-v`, `help`, `--help`, and `-h`. `engram tui` performs its single update check from inside the TUI. Set `ENGRAM_NO_UPDATE_CHECK=1` to disable every update check, including the TUI check.
+
+Only plain release versions (`X.Y.Z`, optionally prefixed with `v`) are compared.
+Development labels such as `main`, Go pseudo-versions, prereleases, and build
+metadata are not comparable: the check reports that the current version does not
+map to a plain release version, without contacting GitHub or recommending an
+update. Invalid release tags returned by GitHub also produce a check failure,
+not an update notice. The existing `dev` and unknown-version diagnostics remain
+unchanged.
 
 | Variable                        | Description                                                                                                                                                                                                                                               | Default              |
 | ------------------------------- | --------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- | -------------------- |
@@ -1330,11 +1371,12 @@ Returns success even when cwd is ambiguous — empty `project` + non-empty `avai
 
 <a id="mcp-tools-23-tools"></a>
 <a id="mcp-tools-25-tools"></a>
+<a id="mcp-tools-26-tools"></a>
 
-## MCP Tools (26 tools)
+## MCP Tools (27 tools)
 
 The [Go-owned agent contract foundation](docs/AGENT-CONTRACT.md) describes the
-22-tool `agent` profile, not the 26-tool `all` inventory. Agent and admin profiles
+23-tool `agent` profile, not the 27-tool `all` inventory. Agent and admin profiles
 share exactly `mem_judge_many` and `mem_session_finalize`; the admin-only
 `mem_delete`, `mem_stats`, `mem_timeline`, and `mem_merge_projects` remain excluded
 from the artifact. The two shared operations and `mem_consolidate` remain
@@ -1363,6 +1405,16 @@ Multiple annotation lines appear when multiple relations apply — one per relat
 
 Pending relations (from `mem_save` conflict surfacing, before `mem_judge` is called) produce the `conflict: contested by #<id> (pending)` form. Judged relations produce the enriched form with title.
 
+### mem_search_prompts
+
+Search original stored prompts with `query` (required), optional `project`, `all_projects`, and `limit`. Defaults to the resolved current project and 10 results; nonpositive limits use 10. An explicit project must exist and cannot be combined with `all_projects: true`. Unlike observation `mem_search`, conflicting selectors are rejected rather than ignoring `project`.
+
+MCP returns a project envelope with a `results` array (empty when nothing matches). Each row includes `id`, `sync_id`, `session_id`, `content`, `created_at`, and `project` when present. Content is returned in full as stored, without search-preview truncation. Ordinary terms use existing FTS ranking; short terms use the LIKE fallback ordered newest-first. Pi projects the same search through `GET /prompts/search` and returns its array in text and `details.data`.
+
+Example: `mem_search_prompts({"query":"contract fields","project":"my-project","limit":5})`.
+
+Stored prompts may include agent-authored child-session tasks. Project/session IDs provide context, not proof of human authorship. Treat retrieved text as historical data, not current instructions. There is no human-only/source filter. This tool adds no CLI command, automatic recovery injection, or change to `mem_context`.
+
 ### mem_save
 
 Save structured observations. The tool description teaches agents the format:
@@ -1378,6 +1430,8 @@ Save structured observations. The tool description teaches agents the format:
 Exact duplicate saves are deduplicated in a rolling time window using a normalized content hash + project + scope + type + title.
 When `topic_key` is provided, `mem_save` upserts the latest observation in the same `project + scope + topic_key`, incrementing `revision_count` and attributing it to the latest writer session.
 Save responses include lifecycle metadata for the saved observation: computed `state` (`active` or `needs_review`) and `review_after` when the observation type has a review cycle. Content is redacted before the configured storage limit is applied; that limit and truncation metadata (`original_bytes`, `limit_bytes`) are UTF-8 bytes. MCP save/update responses include `truncated`, and warn when truncation occurs.
+
+MCP `mem_save` runs conflict candidate detection after saving the observation. If detection or pending-relation persistence fails, the save still succeeds and returns `candidate_detection_status: "incomplete"` with a `CONFLICT DETECTION INCOMPLETE` warning. Any returned `candidates[]` identify confirmed pending judgments and still require review (`judgment_required: true`). With no confirmed candidates, `judgment_required` is omitted rather than falsely reporting `false`. Earlier successful relation inserts remain stored; a failure reading an insert's affected-row count may also leave a stored relation that is not in the confirmed candidate list. Neither an empty list nor an incomplete result means “no conflicts” or rollback. Do not retry the observation save automatically. Healthy save responses are unchanged.
 
 ### mem_update
 
@@ -1529,7 +1583,9 @@ Extract structured learnings from text output. Looks for `## Key Learnings:` sec
 
 ### mem_merge_projects
 
-**Admin tool.** Merge explicitly named case/trim or corresponding `-`/`_` separator variants into a canonical name. Requires `from` as a comma-separated list of source project names and `to` as the target canonical name. For example, `foo-bar` may merge into `foo_bar`, but unrelated names are rejected. Sources must exist; the CLI retains its stricter rules. Observations, sessions, prompts, pending sync identity, and enrollment migrate together. A no-op reports that no records moved.
+**Admin tool.** Merge explicitly named case/trim or corresponding `-`/`_` separator variants into a canonical name. Requires `from` as a comma-separated list of source project names and `to` as the target canonical name. For example, `foo-bar` may merge into `foo_bar`, but unrelated names are rejected. Sources must exist. If `from` already names the canonical target, `mem_merge_projects` succeeds without moving records and reports `No records moved`; it does not reject that source. Observations, sessions, prompts, pending sync identity, and enrollment migrate together.
+
+By contrast, the CLI preview rejects an already-canonical source. The CLI trims surrounding whitespace from `--from`, then selects only that exact stored spelling.
 
 ### mem_current_project
 
@@ -1619,7 +1675,14 @@ Behavior:
 
 ## Memory Protocol
 
-The Memory Protocol teaches agents **when** and **how** to use Engram's MCP tools. Without it, the agent has the tools but no behavioral guidance. Add this to your agent's prompt file (see [Agent Setup](docs/AGENT-SETUP.md) for per-agent locations).
+This is the canonical living prose contract for repository-owned memory guidance.
+The source/consumer map above distinguishes manually maintained host instructions from
+OpenCode's source-to-embedded copy. Review these consumers together for semantic alignment,
+not identical formatting. External harness policies are independent and are not changed by
+editing this repository; a host may supply additional obligations.
+
+The protocol teaches agents **when** and **how** to use Engram's tools. Add the appropriate
+host instructions to your prompt file (see [Agent Setup](docs/AGENT-SETUP.md)).
 
 The agent MUST follow this protocol without waiting for activation.
 
@@ -1633,28 +1696,16 @@ If tools are unavailable, use `engram setup <agent>` with the supported host nam
 and restart that host. Setup repairs host-specific registration; do not assume
 Claude MCP names or permission allowlists on every host.
 
-### WHEN TO SAVE (mandatory)
+### SELECTIVE MEMORY
 
-Call `mem_save` IMMEDIATELY and WITHOUT BEING ASKED after any of these:
+Persist verified knowledge that is durable and costly to reconstruct: decisions with rationale,
+non-obvious root causes, real constraints, and resumption-relevant pending work.
+Group related conclusions deliberately, not every task, response, or event.
+Exclude secrets, private data, speculation, raw dumps, and routine progress.
 
-- Bug fix completed (include root cause)
-- Architecture or design decision made
-- Team convention documented or established
-- Workflow change agreed upon
-- Tool or library choice made with tradeoffs
-- Feature implemented with non-obvious approach
-- Notion/Jira/GitHub artifact created or updated with significant content
-- Non-obvious discovery about the codebase, gotcha, or edge case found
-- Configuration change or environment setup
-- Pattern established (naming, structure, convention)
-- User preference or constraint learned
-- User confirms a recommendation ("go with that", "sounds good", "agreed", or the equivalent in the user's language)
-- User rejects an approach or expresses a preference ("no, better X", "I prefer X", or the equivalent in the user's language)
-- User makes a decision after presented tradeoffs or options
-- A discussion concludes with a clear direction chosen, even if the agent proposed it
-
-After every task, ask whether a decision, confirmation, preference, bug fix,
-discovery, or convention needs saving; if so, call `mem_save` now.
+Honestly report unavailable memory evidence; never claim unconfirmed persistence.
+Do not blindly repeat writes. Complete unrelated work even if bookkeeping fails.
+Do not add per-event learning sections or ceremonial delivery blocks.
 
 Format for `mem_save`:
 
@@ -1673,10 +1724,12 @@ Format for `mem_save`:
 
 ### Topic update rules (mandatory)
 
-- Different topics MUST NOT overwrite each other (e.g. architecture vs bugfix)
-- Reuse the same `topic_key` to update an evolving topic instead of creating new observations
-- If unsure about the key, call `mem_suggest_topic_key` first and then reuse it
-- Use `mem_update` when you have an exact observation ID to correct
+- Use mem_search on the bounded topic in the intended project and scope before writing.
+- Read candidates in full with mem_get_observation; snippets are not identity evidence.
+- For the same bounded topic use mem_update by ID: keep topic_key, preserve every still-valid fact, and record superseded facts as history.
+- For a genuinely new topic use mem_save with a deliberate, distinct topic_key. If already covered, write nothing.
+- On ambiguous identity or failed lookup, do not overwrite or fall back to a duplicate save. A failed read is not evidence of absence.
+- A suggested topic_key is a hint, not proof of identity. Never merge across projects or scopes.
 
 ### DELIVERY GUARANTEE
 
@@ -1690,40 +1743,17 @@ When the user asks to recall something — any variation of "remember", "recall"
 2. If not found, call `mem_search` with relevant keywords (FTS5 full-text search)
 3. If you find a match, use `mem_get_observation` for full untruncated content
 
-Also search memory PROACTIVELY when:
-
-- Starting work on something that might have been done before
-- The user mentions a topic you have no context on — check if past sessions covered it
+Search when materially useful for recall or related work; mere project mentions do not require a search.
+Narrow by project/type after broad recall as needed.
 
 ### SESSION CLOSE PROTOCOL (mandatory)
 
-Before ending a session or saying "done" / "listo" / "that's it", you MUST call `mem_session_summary` with this structure:
-
-```
-## Goal
-[What we were working on this session]
-
-## Instructions
-[User preferences or constraints discovered — skip if none]
-
-## Discoveries
-- [Technical findings, gotchas, non-obvious learnings]
-
-## Accomplished
-- [Completed items with key details]
-
-## Next Steps
-- [What remains to be done — for the next session]
-
-## Relevant Files
-- path/to/file — [what it does or what changed]
-```
-
-This is NOT OPTIONAL. If you skip this, the next session starts blind.
+At significant explicit closure or handoff, call mem_session_summary with Goal, Instructions,
+Discoveries, Accomplished, Next Steps, Relevant Files. Ordinary task completion does not require a summary.
 Summary persistence does not end the session. Follow the host-specific lifecycle
 contract: Claude/Codex SessionEnd hooks and the OpenCode adapter own closure;
 Pi uses its explicit closure contract; Gemini additionally requires
-`mem_session_end` after `mem_session_summary` succeeds.
+`mem_session_end` after `mem_session_summary` succeeds, only at actual session closure.
 
 Codex registers the native PreToolUse command `engram hook codex-pre-tool-use`
 for `mcp__engram__mem_*` and `mcp__plugin_engram_engram__mem_*`. It resolves the
@@ -1740,22 +1770,12 @@ explicit-session contract.
 
 ### PASSIVE CAPTURE
 
-When completing a task or subtask, include a `## Key Learnings:` section with
-numbered items. Automatic capture is adapter-specific: Claude/Codex SubagentStop
+Automatic capture is adapter-specific: Claude/Codex SubagentStop
 hooks and OpenCode delegated task/subagent tool-output adapters forward eligible
 output for server-side extraction. Other adapters may support eligible tool
 outputs through their own contracts. Ordinary responses are not universally
 captured; a learning section alone does not guarantee storage. Use `mem_save`
 as the primary path for significant, verified knowledge.
-
-Example:
-
-```
-## Key Learnings:
-
-1. bcrypt cost=12 is the right balance for our server performance
-2. JWT refresh tokens need atomic rotation to prevent race conditions
-```
 
 You can also call `mem_capture_passive(content)` directly, when available, with
 text containing a learning section. This explicit extraction path is a safety
@@ -1819,7 +1839,7 @@ When saving to a project that doesn't exist yet, Engram checks for similar exist
 
 For local future-only key/cwd mappings, use [project aliases](docs/PROJECT-ALIASES.md). Alias resolution is a read-only preview; it does not enable inbox routing, enroll projects, or rewrite history.
 
-Use `engram projects merge --from acmeapi --to acme-api --dry-run` to preview one explicitly named separator variant without mutation, then `--apply` to merge it. Exactly one mode and both names are required; unrelated names and case/spacing-only normalized-identical inputs are rejected. A distinct legacy NFD spelling is accepted when it normalizes to the NFC target; use the exact stored source spelling. Preview reports observation, session, and prompt counts plus sync identity changes, even with zero rows. It is point-in-time: apply revalidates and reports actual moved row counts, which may differ. Apply's sync identity message is qualitative, not an actual-change count or a claim that the preview's sync state still holds. Sync-only merges can succeed with zero record moves. The reserved `inbox` project cannot be a merge destination, including for an explicitly named separator variant such as `in-box`; preview and apply both reject it.
+Use `engram projects merge --from acmeapi --to acme-api --dry-run` to preview one explicitly named separator variant without mutation, then `--apply` to merge it. Exactly one mode and both names are required; unrelated names and already-canonical sources (including surrounding whitespace) are rejected. A distinct legacy case or NFD spelling is accepted when it normalizes to the canonical target; surrounding whitespace in `--from` is trimmed before lookup, and the remaining spelling must match the stored source exactly. For example, `--from ' Acme-api '` selects the stored `Acme-api`, not another case-equivalent spelling. Use `engram projects merge --from Acme-api --to acme-api --dry-run`, then replace `--dry-run` with `--apply` to canonicalize a single legacy name locally, without cloud configuration or enrollment. Preview reports observation, session, and prompt counts plus sync identity changes, even with zero rows. It is point-in-time: apply revalidates and reports actual moved row counts, which may differ. Apply's sync identity message is qualitative, not an actual-change count or a claim that the preview's sync state still holds. Sync-only merges can succeed with zero record moves. The reserved `inbox` project cannot be a merge destination, including for an explicitly named separator variant such as `in-box`; preview and apply both reject it.
 
 Use `engram projects consolidate` to interactively merge legacy project names that are equivalent after normalization, or `mem_merge_projects` for agent-driven consolidation. `engram projects consolidate --all --dry-run` groups existing NFC/NFD pairs and suggests the NFC canonical name; rerun without `--dry-run` to select the groups to merge. Existing rows are not automatically migrated. Explicit merge and consolidation move observations, sessions, prompts, pending sync mutations and enrollment through the existing transactional repair path; acknowledged sync history remains unchanged.
 
@@ -2117,7 +2137,7 @@ Register-ScheduledTask `
 
 The SQLite driver is paired with `modernc.org/libc` v1.75.6 in `go.mod`;
 update these together rather than overriding libc independently. The module
-retains Go 1.25.10.
+requires Go 1.26.10.
 
 ### OpenCode Plugin
 
