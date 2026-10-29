@@ -1,12 +1,15 @@
 package tui
 
 import (
+	"fmt"
 	"strings"
 	"testing"
 
 	"github.com/Gentleman-Programming/engram/v3/internal/setup"
 	"github.com/Gentleman-Programming/engram/v3/internal/store"
 	"github.com/Gentleman-Programming/engram/v3/internal/version"
+
+	"github.com/charmbracelet/bubbles/textarea"
 	tea "github.com/charmbracelet/bubbletea"
 	"github.com/charmbracelet/lipgloss"
 )
@@ -491,6 +494,60 @@ func TestViewSetupAllowlistPrompt(t *testing.T) {
 			t.Fatal("should show error message")
 		}
 	})
+}
+
+func TestViewObservationEditRendersHeaderTitleContentHelp(t *testing.T) {
+	fx := newTestFixture(t)
+	obs := loadFixtureObservation(t, fx, fx.obsID)
+	m := New(fx.store, "")
+	m.Screen = ScreenObservationEdit
+	m.SelectedObservation = obs
+	m.Width = 80
+	m.Height = 24
+	m.EditTitle = newTextInput()
+	m.EditTitle.SetValue(obs.Title)
+	m.EditContent = textarea.New()
+	m.EditContent.SetValue(obs.Content)
+	m.EditContent.SetWidth(76)
+	m.EditContent.SetHeight(18)
+	m.EditFeedback = "✓ Saved!"
+
+	out := m.View()
+	wantHeader := fmt.Sprintf("Observation #%d — Edit", obs.ID)
+	if !strings.Contains(out, wantHeader) {
+		t.Fatalf("edit view missing header %q", wantHeader)
+	}
+	if !strings.Contains(out, "Title:") {
+		t.Fatal("edit view missing title label")
+	}
+	if !strings.Contains(out, obs.Content) {
+		t.Fatal("edit view missing content buffer")
+	}
+	if !strings.Contains(out, "tab/shift+tab focus • arrows scroll • ctrl+s save • esc cancel") {
+		t.Fatalf("edit view missing help line; got: %q", out)
+	}
+	if !strings.Contains(out, "✓ Saved!") {
+		t.Fatal("view missing edit feedback")
+	}
+}
+
+func TestObservationDetailHelpContainsEditShortcut(t *testing.T) {
+	out := observationDetailHelp()
+	if !strings.Contains(out, "e edit") {
+		t.Fatalf("observation detail help missing e edit: %q", out)
+	}
+}
+
+func TestViewObservationEditWithoutSelectedObservation(t *testing.T) {
+	m := New(nil, "")
+	m.Screen = ScreenObservationEdit
+	m.Width = 80
+	m.Height = 24
+
+	out := m.View()
+	if !strings.Contains(out, "No observation selected.") {
+		t.Fatalf("empty edit view missing missing-observation state: %q", out)
+	}
 }
 
 func TestObservationDetailScrollStopsAtContentBottom(t *testing.T) {

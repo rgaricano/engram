@@ -8,7 +8,9 @@ import (
 	"github.com/Gentleman-Programming/engram/v3/internal/cloudconfig"
 	"github.com/Gentleman-Programming/engram/v3/internal/setup"
 	"github.com/Gentleman-Programming/engram/v3/internal/store"
+	"github.com/charmbracelet/bubbles/key"
 	"github.com/charmbracelet/bubbles/spinner"
+	"github.com/charmbracelet/bubbles/textarea"
 	tea "github.com/charmbracelet/bubbletea"
 )
 
@@ -27,6 +29,9 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		// Global quit — always works
 		if msg.String() == "ctrl+c" {
 			return m, tea.Quit
+		}
+		if m.Screen == ScreenObservationEdit {
+			return m.handleObservationEditKeys(msg)
 		}
 		// If search input is focused, let it handle most keys
 		if m.Screen == ScreenSearch && m.SearchInput.Focused() {
@@ -81,7 +86,22 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		m.DetailScroll = 0
 		return m, nil
 
+	case observationUpdatedMsg:
+		if msg.err != nil {
+			m.ErrorMsg = msg.err.Error()
+			return m, nil
+		}
+		m.ErrorMsg = ""
+		m.SelectedObservation = msg.observation
+		m.EditFeedback = "✓ Saved!"
+		m.Screen = ScreenObservationDetail
+		m.DetailScroll = 0
+		m.EditTitle.Blur()
+		m.EditContent.Blur()
+		return m, clearEditFeedbackAfter(2*time.Second)
+
 	case timelineMsg:
+
 		if msg.err != nil {
 			m.ErrorMsg = msg.err.Error()
 			return m, nil
@@ -261,6 +281,10 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 
 	case clipboardClearMsg:
 		m.CopyFeedback = ""
+		return m, nil
+
+	case editFeedbackClearMsg:
+		m.EditFeedback = ""
 		return m, nil
 
 	case spinner.TickMsg:
@@ -544,9 +568,9 @@ func (m Model) handleRecentKeys(key string) (tea.Model, tea.Cmd) {
 
 // ─── Observation Detail ──────────────────────────────────────────────────────
 
-func (m Model) handleObservationDetailKeys(key string) (tea.Model, tea.Cmd) {
+func (m Model) handleObservationDetailKeys(keyStr string) (tea.Model, tea.Cmd) {
 	m.DetailScroll = m.clampDetailScroll()
-	switch key {
+	switch keyStr {
 	case "up", "k":
 		if m.DetailScroll > 0 {
 			m.DetailScroll--
@@ -564,6 +588,41 @@ func (m Model) handleObservationDetailKeys(key string) (tea.Model, tea.Cmd) {
 		if m.SelectedObservation != nil {
 			return m, loadTimeline(m.store, m.SelectedObservation.ID)
 		}
+	case "e":
+		if m.SelectedObservation == nil {
+			return m, nil
+		}
+		m.EditTitle = newTextInput()
+		m.EditTitle.SetValue(m.SelectedObservation.Title)
+		m.EditContent = textarea.New()
+		m.EditContent.SetValue(m.SelectedObservation.Content)
+		contentRows := m.Height - 6
+		if contentRows < 2 {
+			contentRows = 2
+		}
+		m.EditContent.SetWidth(m.Width - 4)
+		m.EditContent.SetHeight(contentRows)
+		m.EditContent.CharLimit = m.store.MaxObservationLength()
+        // Bind the content textarea so up/down/pageup/pagedown scroll the
+        // text. j and k are plain characters while editing, so they are not
+        // bound here; tab, shift+tab and enter are owned by the handler for
+        // focus movement. The default KeyMap already binds down/ctrl+n and
+        // up/ctrl+p; add the page keys.
+	m.EditContent.KeyMap.LineNext = key.NewBinding(
+		key.WithKeys("down", "ctrl+n", "pgdown"),
+		key.WithHelp("down", "next line / page down"),
+	)
+	m.EditContent.KeyMap.LinePrevious = key.NewBinding(
+		key.WithKeys("up", "ctrl+p", "pgup"),
+		key.WithHelp("up", "previous line / page up"),
+	)
+		m.EditError = ""
+		m.EditFeedback = ""
+		// Do not reset PrevScreen here: it holds the screen that opened the
+		// observation detail (e.g. ScreenRecent), and the edit screen's esc or
+		// save must return through the detail back to it.
+		m.Screen = ScreenObservationEdit
+		return m, m.EditContent.Focus()
 	case "esc", "q":
 		m.Screen = m.PrevScreen
 		m.Cursor = 0
@@ -703,6 +762,74 @@ func (m Model) handleSessionDetailKeys(key string) (tea.Model, tea.Cmd) {
 		m.Cursor = m.SelectedSessionIdx
 		m.SessionDetailScroll = 0
 		return m, loadRecentSessions(m.store)
+	}
+	return m, nil
+}
+
+// handleObservationEditKeys handles input while editing an observation.
+func (m Model) handleObservationEditKeys(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
+	switch msg.String() {
+	case "ctrl+s":
+		if m.SelectedObservation == nil {
+			return m, nil
+		}
+		return m, saveObservationEdit(m.store, m.SelectedObservation.ID, m.EditTitle.Value(), m.EditContent.Value())
+	case "esc", "q":
+		m.EditTitle.Blur()
+		m.EditContent.Blur()
+		// Return explicitly to the observation detail; PrevScreen holds the
+		// screen that opened the detail (e.g. ScreenRecent) and must not be
+		// clobbered by the edit screen.
+		m.Screen = ScreenObservationDetail
+		m.DetailScroll = 0
+		return m, loadObservationDetail(m.store, m.SelectedObservation.ID)
+	case "tab":
+		// Title is a single-line input; tab moves focus to the content
+		// textarea. j is no longer bound for focus movement; it falls through
+		// to the default case below and is inserted as a plain character by
+		// whichever buffer is focused.
+		if m.EditTitle.Focused() {
+			m.EditTitle.Blur()
+			return m, m.EditContent.Focus()
+		}
+	case "shift+tab":
+		// shift+tab moves focus from the content textarea back to the title.
+		// k is no longer bound for focus movement; while content is focused it
+		// falls through to the default case below and is inserted into the
+		// content textarea, and while the title is focused it is inserted into
+		// the single-line title input.
+		if m.EditContent.Focused() {
+			m.EditContent.Blur()
+			return m, m.EditTitle.Focus()
+		}
+		return m, nil
+	case "enter":
+		if m.EditTitle.Focused() {
+			m.EditTitle.Blur()
+			return m, m.EditContent.Focus()
+		}
+	case "up", "down", "pgup", "pgdown":
+		// Arrow and page keys are vertical movement. While the single-line
+		// title is focused they are explicit no-ops and must not reach
+		// EditTitle.Update. While the content textarea is focused they fall
+		// through to the default case below, which delegates to the content
+		// buffer for scrolling.
+		if m.EditTitle.Focused() {
+			return m, nil
+		}
+	default:
+		// Delegate to the focused buffer.
+	}
+
+	if m.EditContent.Focused() {
+		content, cmd := m.EditContent.Update(msg)
+		m.EditContent = content
+		return m, cmd
+	}
+	if m.EditTitle.Focused() {
+		title, cmd := m.EditTitle.Update(msg)
+		m.EditTitle = title
+		return m, cmd
 	}
 	return m, nil
 }
@@ -1004,4 +1131,14 @@ func (m Model) refreshScreen(screen Screen) tea.Cmd {
 	default:
 		return nil
 	}
+}
+
+// editFeedbackClearMsg is sent after the edit feedback timer expires.
+type editFeedbackClearMsg struct{}
+
+// clearEditFeedbackAfter returns a Cmd that sends editFeedbackClearMsg after d.
+func clearEditFeedbackAfter(d time.Duration) tea.Cmd {
+	return tea.Tick(d, func(_ time.Time) tea.Msg {
+		return editFeedbackClearMsg{}
+	})
 }
